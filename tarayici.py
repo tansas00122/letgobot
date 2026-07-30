@@ -31,7 +31,7 @@ def save_seen_urls(seen_set: set):
         logging.error(f"Kayıt hatası: {e}")
 
 def send_to_webhook(item_url: str) -> bool:
-    payload = {"source": "Letgo", "search_query": "Logitech G300s", "link": item_url}
+    payload = {"source": "Letgo", "search_query": "iPhone 13", "link": item_url}
     try:
         res = requests.post(config.WEBHOOK_URL, json=payload, timeout=config.WEBHOOK_TIMEOUT_SECONDS)
         if res.status_code == 200:
@@ -44,16 +44,21 @@ def send_to_webhook(item_url: str) -> bool:
 
 def extract_item_links(page) -> list:
     logging.info(f"Tarama yapılıyor: {config.SEARCH_URL}")
-    page.goto(config.SEARCH_URL, wait_until="commit", timeout=config.PAGE_LOAD_TIMEOUT)
-    page.wait_for_timeout(3000)
+    try:
+        page.goto(config.SEARCH_URL, wait_until="networkidle", timeout=config.PAGE_LOAD_TIMEOUT)
+    except Exception:
+        page.goto(config.SEARCH_URL, wait_until="load", timeout=config.PAGE_LOAD_TIMEOUT)
+    
+    page.wait_for_timeout(5000)
 
-    for _ in range(4):
+    for _ in range(3):
         page.keyboard.press("PageDown")
-        page.wait_for_timeout(1000)
+        page.wait_for_timeout(1500)
 
     raw_links = page.evaluate("""
-        () => Array.from(document.querySelectorAll('a[href*="/item/"], a[href*="/i/"], a[href*="/ilan/"]'))
+        () => Array.from(document.querySelectorAll('a'))
             .map(a => a.href)
+            .filter(href => href && (href.includes('/item/') || href.includes('/i/') || href.includes('/ilan/')))
     """)
 
     cleaned_links = list(set([link.split("?")[0] for link in raw_links if link]))
@@ -97,7 +102,7 @@ def start_bot():
             except Exception as e:
                 logging.error(f"Döngü hatası: {e}")
 
-            logging.info(f"⏳ {config.CHECK_INTERVAL_SECONDS // 60} dakika bekleniyor...\n")
+            logging.info(f"⏳ {config.CHECK_INTERVAL_SECONDS} saniye bekleniyor...\n")
             time.sleep(config.CHECK_INTERVAL_SECONDS)
 
 if __name__ == "__main__":
