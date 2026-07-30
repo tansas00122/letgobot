@@ -45,11 +45,16 @@ def send_to_webhook(item_url: str) -> bool:
 def extract_item_links(page) -> list:
     logging.info(f"Tarama yapılıyor: {config.SEARCH_URL}")
     try:
-        page.goto(config.SEARCH_URL, wait_until="networkidle", timeout=config.PAGE_LOAD_TIMEOUT)
+        page.goto(config.SEARCH_URL, wait_until="domcontentloaded", timeout=config.PAGE_LOAD_TIMEOUT)
     except Exception:
-        page.goto(config.SEARCH_URL, wait_until="load", timeout=config.PAGE_LOAD_TIMEOUT)
+        pass
     
-    page.wait_for_timeout(5000)
+    page.wait_for_timeout(7000)
+
+    try:
+        page.click("button:has-text('Kabul Et')", timeout=3000)
+    except Exception:
+        pass
 
     for _ in range(3):
         page.keyboard.press("PageDown")
