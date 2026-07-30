@@ -1,104 +1,64 @@
 import json
 import logging
-import os
+import signal
 import time
+from pathlib import Path
+from typing import Set
+from urllib.parse import urlsplit, urlunsplit
+
 import requests
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import sync_playwright
 
 import config
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler()]
+    handlers=[logging.StreamHandler()],
 )
+logger = logging.getLogger(__name__)
 
-def load_seen_urls() -> set:
-    if not os.path.exists(config.SEEN_FILE_PATH):
+stop_requested = False
+
+
+def request_stop(_signum, _frame):
+    global stop_requested
+    stop_requested = True
+    logger.info("Kapatma sinyali alındı; mevcut tur tamamlanıyor.")
+
+
+def normalize_url(url: str) -> str:
+    parts = urlsplit(url)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/"), "", ""))
+
+
+def load_seen_urls() -> Set[str]:
+    path = config.SEEN_FILE_PATH
+    if not path.exists():
         return set()
     try:
-        with open(config.SEEN_FILE_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return set(data) if isinstance(data, list) else set()
-    except Exception:
-        return set()
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return {normalize_url(url) for url in data if isinstance(url, str)}
+        logger.warning("Hafıza dosyası liste formatında değil; boş başlatılıyor.")
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Hafıza dosyası okunamadı: %s", exc)
+    return set()
 
-def save_seen_urls(seen_set: set):
+
+def save_seen_urls(seen_urls: Set[str]) -> None:
+    path: Path = config.SEEN_FILE_PATH
+    temp_path = path.with_suffix(path.suffix + ".tmp")
     try:
-        with open(config.SEEN_FILE_PATH, "w", encoding="utf-8") as f:
-            json.dump(list(seen_set), f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logging.error(f"Kayıt hatası: {e}")
-
-def send_to_webhook(item_url: str) -> bool:
-    payload = {"source": "Letgo", "search_query": "Logitech G300s", "link": item_url}
-    try:
-        res = requests.post(config.WEBHOOK_URL, json=payload, timeout=config.WEBHOOK_TIMEOUT_SECONDS)
-        if res.status_code == 200:
-            logging.info(f"✅ Webhook'a gönderildi: {item_url}")
-            return True
-        return False
-    except Exception as e:
-        logging.error(f"❌ Webhook hatası: {e}")
-        return False
-
-def extract_item_links(page) -> list:
-    logging.info(f"Tarama yapılıyor: {config.SEARCH_URL}")
-    page.goto(config.SEARCH_URL, wait_until="commit", timeout=config.PAGE_LOAD_TIMEOUT)
-    page.wait_for_timeout(3000)
-
-    for _ in range(4):
-        page.keyboard.press("PageDown")
-        page.wait_for_timeout(1000)
-
-    raw_links = page.evaluate("""
-        () => Array.from(document.querySelectorAll('a[href*="/item/"], a[href*="/i/"], a[href*="/ilan/"]'))
-            .map(a => a.href)
-    """)
-
-    cleaned_links = list(set([link.split("?")[0] for link in raw_links if link]))
-    logging.info(f"Sayfada toplam {len(cleaned_links)} adet ilan tespit edildi.")
-    return cleaned_links
-
-def start_bot():
-    seen_urls = load_seen_urls()
-    logging.info(f"🚀 Bot Başlatıldı. Hafıza: {len(seen_urls)}")
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=config.HEADLESS,
-            args=["--disable-blink-features=AutomationControlled"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path.write_text(
+            json.dumps(sorted(seen_urls), ensure_ascii=False, indent=2), encoding="utf-8"
         )
-        context = browser.new_context(
-            user_agent=config.USER_AGENT,
-            viewport=config.VIEWPORT,
-            locale="tr-TR"
-        )
-        page = context.new_page()
+        temp_path.replace(path)  # Atomik yazma: çökmede JSON bozulmaz.
+    except OSError as exc:
+        logger.error("Hafıza kaydedilemedi: %s", exc)
 
-        while True:
-            try:
-                current_links = extract_item_links(page)
-                has_new_item = False
 
-                for link in current_links:
-                    if link not in seen_urls:
-                        logging.info(f"🔥 YENİ İLAN: {link}")
-                        send_to_webhook(link)
-                        seen_urls.add(link)
-                        has_new_item = True
-                        time.sleep(1)
-
-                if has_new_item:
-                    save_seen_urls(seen_urls)
-                else:
-                    logging.info("Yeni ilan bulunamadı.")
-
-            except Exception as e:
-                logging.error(f"Döngü hatası: {e}")
-
-            logging.info(f"⏳ {config.CHECK_INTERVAL_SECONDS // 60} dakika bekleniyor...\n")
-            time.sleep(config.CHECK_INTERVAL_SECONDS)
-
-if __name__ == "__main__":
-    start_bot()
+def send_to_webhook(session: requests.Session, item_url: str) -> bool:
